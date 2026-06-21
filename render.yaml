@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: ninjamap-charter-bot
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: TEST_MODE
+        value: "true"
+      - key: COACH_ROLE_NAME
+        value: Coach
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: charter-logs
+      mountPath: /var/data
+      sizeGB: 1

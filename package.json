@@ -1,0 +1,21 @@
+{
+  "name": "ninjamap-community-charter",
+  "version": "1.0.0",
+  "description": "Ninjamap Community Charter acceptance bot.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "register": "node src/register-commands.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "discord.js": "latest",
+    "dotenv": "latest"
+  },
+  "overrides": {
+    "undici": "^6.27.0"
+  }
+}
