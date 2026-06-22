@@ -96,6 +96,17 @@ async function registerGuildCommands() {
           .setRequired(true)
       )
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("reverify-status")
+      .setDescription("Show one member's charter acceptance and role restore status.")
+      .addUserOption((option) =>
+        option
+          .setName("member")
+          .setDescription("Member to inspect.")
+          .setRequired(true)
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
       .toJSON()
   ];
 
@@ -502,6 +513,43 @@ async function handleReverifyRollbackTest(interaction) {
   });
 }
 
+async function handleReverifyStatus(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    await interaction.reply({ content: "คำสั่งนี้ใช้ได้เฉพาะแอดมินค่ะ", ephemeral: true });
+    return;
+  }
+
+  const member = await getTargetMember(interaction);
+  const snapshot = await getRoleSnapshot(member.id, config.charterVersion);
+  const acceptanceLogs = await readAcceptanceLogs();
+  const acceptance = acceptanceLogs.find(
+    (log) => log.userId === member.id && log.charterVersion === config.charterVersion
+  );
+  const currentManagedRoles = getManagedRolesFromMember(member);
+
+  await interaction.reply({
+    content: [
+      "**Reverification status**",
+      `User: ${member.user.tag} (${member.id})`,
+      `Charter version: ${config.charterVersion}`,
+      "",
+      `Accepted: ${acceptance ? "yes" : "no"}`,
+      `Accepted at: ${acceptance?.acceptedAt || "none"}`,
+      `Accepted sections: ${acceptance?.acceptedSections?.join(", ") || "none"}`,
+      "",
+      `Snapshot status: ${snapshot?.status || "none"}`,
+      `Snapshot roles: ${snapshot?.removedRoles?.map((role) => role.name).join(", ") || "none"}`,
+      `Removed roles: ${snapshot?.actuallyRemovedRoles?.map((role) => role.name).join(", ") || "none"}`,
+      `Restored roles: ${snapshot?.restoredRoles?.map((role) => role.name).join(", ") || "none"}`,
+      `Failed removed: ${snapshot?.failedRemovedRoles?.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
+      `Failed restored: ${snapshot?.failedRestoredRoles?.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
+      "",
+      `Current managed roles: ${currentManagedRoles.map((role) => role.name).join(", ") || "none"}`
+    ].join("\n"),
+    ephemeral: true
+  });
+}
+
 async function handleCharterButton(interaction) {
   if (!memberCanTest(interaction.member)) {
     await interaction.reply({
@@ -606,6 +654,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isChatInputCommand() && interaction.commandName === "reverify-rollback-test") {
       await handleReverifyRollbackTest(interaction);
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "reverify-status") {
+      await handleReverifyStatus(interaction);
     }
   } catch (error) {
     console.error(error);

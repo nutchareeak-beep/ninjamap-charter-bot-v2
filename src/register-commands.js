@@ -36,6 +36,16 @@ const commands = [
         .setDescription("Test member to restore.")
         .setRequired(true)
     )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName("reverify-status")
+    .setDescription("Show one member's charter acceptance and role restore status.")
+    .addUserOption((option) =>
+      option
+        .setName("member")
+        .setDescription("Member to inspect.")
+        .setRequired(true)
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ].map((command) => command.toJSON());
 
