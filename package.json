@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "discord.js": "latest",
-    "dotenv": "latest"
+    "dotenv": "latest",
+    "pg": "^8.22.0"
   },
   "overrides": {
     "undici": "^6.27.0"

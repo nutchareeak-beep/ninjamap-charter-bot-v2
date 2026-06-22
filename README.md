@@ -14,6 +14,7 @@
 - มีคำสั่ง `/export-acceptance-logs`
 - มี test mode สำหรับ role Coach ก่อนเปิดใช้จริง
 - มีคำสั่ง test lock รายคน โดยจัดการเฉพาะ role `user`, `Membership`, `นักเรียน`, `Member`, `Free`
+- รองรับ PostgreSQL ผ่าน `DATABASE_URL` เพื่อเก็บ snapshot แบบถาวร
 
 ## Setup
 
@@ -41,6 +42,8 @@ COACH_ROLE_ID=
 COACH_ROLE_NAME=Coach
 MANAGED_ROLE_NAMES=user,Membership,นักเรียน,Member,Free
 PROTECTED_ROLE_NAMES=Admin,Staff,Bot
+DATABASE_URL=
+PGSSLMODE=require
 ```
 
 ถ้าต้องการบังคับ category เอง ให้ใส่:
@@ -76,6 +79,8 @@ Acceptance logs จะถูกเก็บที่:
 ```text
 data/acceptance-logs.json
 ```
+
+ถ้าตั้ง `DATABASE_URL` แล้ว บอทจะเก็บ logs และ role snapshots ใน PostgreSQL แทนไฟล์ JSON
 
 แอดมินสามารถใช้คำสั่งนี้ใน Discord เพื่อ export เป็น CSV:
 

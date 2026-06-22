@@ -23,7 +23,11 @@ CHARTER_CHANNEL_NAME=ข้อตกลงและเงื่อนไข
 CHARTER_VERSION=ninjamap-community-charter-2026
 LOG_CHANNEL_ID=
 DATA_DIR=./data
+DATABASE_URL=
+PGSSLMODE=require
 ```
+
+สำหรับใช้งานจริง แนะนำให้ใช้ PostgreSQL และตั้ง `DATABASE_URL` แทนการพึ่งไฟล์ใน container เพราะ role snapshot ห้ามหาย
 
 ถ้าใช้ Render พร้อม persistent disk ให้ตั้ง:
 
@@ -37,8 +41,18 @@ DATA_DIR=/var/data
 2. อัปโหลดโปรเจกต์นี้ขึ้น GitHub
 3. เข้า Railway แล้วเลือก New Project
 4. เลือก Deploy from GitHub repo
-5. เพิ่ม Variables ตามรายการด้านบน
-6. Railway จะใช้ `npm start` จาก `railway.toml`
+5. เพิ่ม PostgreSQL ใน project: Add หรือ New service แล้วเลือก PostgreSQL
+6. เปิด service บอท แล้วเพิ่ม Variables ตามรายการด้านบน
+7. ใส่ `DATABASE_URL` จาก PostgreSQL service หรือใช้ Railway shared variable ถ้ามีให้เลือก
+8. Railway จะใช้ `npm start` จาก `railway.toml`
+
+เมื่อ `DATABASE_URL` มีค่า บอทจะเก็บข้อมูลใน PostgreSQL:
+
+- acceptance logs
+- role snapshots
+- restore status
+
+ถ้าไม่มี `DATABASE_URL` บอทจะ fallback ไปใช้ไฟล์ JSON ใน `DATA_DIR`
 
 ## Render
 
@@ -69,5 +83,4 @@ npm start
 - หา/สร้างห้อง `#ข้อตกลงและเงื่อนไข`
 - โพสต์ Charter ถ้ายังไม่มี
 - รอรับการกดปุ่มยืนยัน
-
-ตอนนี้ยังไม่มีโค้ดถอด role, คืน role, หรือแก้ role สมาชิกใด ๆ
+- ใน test mode สามารถ snapshot/remove/restore เฉพาะ managed roles รายคนผ่านคำสั่ง test ได้
