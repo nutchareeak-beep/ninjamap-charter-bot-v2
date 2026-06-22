@@ -123,9 +123,11 @@ function setAcceptedSectionsForUser(userId, acceptedSections) {
 
 async function hydrateProgressFromLogs() {
   const logs = await readAcceptanceLogs();
+  const validSectionIds = new Set(charterSections.map((section) => section.id));
   for (const log of logs) {
     if (log.charterVersion === config.charterVersion) {
-      userProgress.set(log.userId, log.acceptedSectionIds || log.acceptedSections || []);
+      const acceptedSectionIds = (log.acceptedSectionIds || []).filter((sectionId) => validSectionIds.has(sectionId));
+      userProgress.set(log.userId, acceptedSectionIds);
     }
   }
 }
@@ -509,7 +511,8 @@ async function handleCharterButton(interaction) {
     return;
   }
 
-  const accepted = getAcceptedSectionsForUser(interaction.user.id);
+  const validSectionIds = new Set(charterSections.map((item) => item.id));
+  const accepted = new Set([...getAcceptedSectionsForUser(interaction.user.id)].filter((item) => validSectionIds.has(item)));
   const previousSection = charterSections[index - 1];
 
   if (previousSection && !accepted.has(previousSection.id)) {
@@ -522,9 +525,12 @@ async function handleCharterButton(interaction) {
 
   accepted.add(section.id);
   setAcceptedSectionsForUser(interaction.user.id, accepted);
-  const acceptedSectionIds = [...accepted];
+  const acceptedSectionIds = charterSections
+    .map((item) => item.id)
+    .filter((sectionId) => accepted.has(sectionId));
+  const hasAcceptedAllSections = charterSections.every((item) => accepted.has(item.id));
 
-  if (accepted.size === charterSections.length) {
+  if (hasAcceptedAllSections) {
     await logAcceptance(interaction, acceptedSectionIds);
     const restoreResult = await restoreManagedRolesFromSnapshot(
       interaction.member,
@@ -536,23 +542,29 @@ async function handleCharterButton(interaction) {
         "ยืนยัน Community Charter ครบทุกข้อแล้วค่ะ",
         `บันทึกเวลา: ${new Date().toISOString()}`,
         `Charter version: ${config.charterVersion}`,
-        `Role restore: ${restoreResult.status}`,
-        `Restored roles: ${restoreResult.restoredRoles.map((role) => role.name).join(", ") || "none"}`,
-        `Failed roles: ${restoreResult.failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
         "",
-        "ตอนนี้ยังเป็น test mode เฉพาะคนที่ถูก lock-test เท่านั้นค่ะ"
+        restoreResult.status === "restored"
+          ? `คืน role แล้ว: ${restoreResult.restoredRoles.map((role) => role.name).join(", ") || "none"}`
+          : `สถานะการคืน role: ${restoreResult.status}`,
+        restoreResult.failedRoles.length
+          ? `Role ที่คืนไม่สำเร็จ: ${restoreResult.failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ")}`
+          : "Role ที่คืนไม่สำเร็จ: none",
+        "",
+        restoreResult.status === "no_snapshot"
+          ? "ไม่พบ snapshot สำหรับ user นี้ หากถูกถอด role ไว้ กรุณาแจ้งแอดมินให้ใช้ /reverify-rollback-test"
+          : "ขอบคุณที่ยืนยัน Community Charter ค่ะ"
       ].join("\n"),
       ephemeral: true
     });
     return;
   }
 
-  const nextSection = charterSections[accepted.size];
+  const nextSection = charterSections.find((item) => !accepted.has(item.id));
   await interaction.reply({
     content: [
-      `✅ บันทึกหัวข้อ ${section.label} แล้วค่ะ`,
-      `ความคืบหน้า: ${accepted.size}/${charterSections.length}`,
-      `ขั้นต่อไป: ${nextSection.label}`
+      `บันทึกหัวข้อ ${section.label} แล้วค่ะ`,
+      `ความคืบหน้า: ${acceptedSectionIds.length}/${charterSections.length}`,
+      nextSection ? `กรุณากดหัวข้อถัดไป: ${nextSection.label}` : "กรุณากดหัวข้อสุดท้ายเพื่อยืนยันให้ครบค่ะ"
     ].join("\n"),
     ephemeral: true
   });
