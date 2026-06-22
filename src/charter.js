@@ -95,6 +95,8 @@ export function buildCharterIntro(version) {
   return [
     "# Ninjamap Community Charter 2026",
     "",
+    "Acceptance mode: single-button",
+    "",
     "ยินดีต้อนรับสู่ Ninjamap Community",
     "ก่อนที่ท่านจะสามารถเข้าถึงห้องต่างๆ ภายใน Community ได้ กรุณาอ่านและยืนยันข้อตกลงต่อไปนี้ให้ครบทุกข้อ",
     "",
@@ -109,7 +111,7 @@ export function buildSectionBody(section, index, total) {
 
 export function buildCharterOutro() {
   return [
-    "🟢 เมื่อกดยอมรับครบทุกข้อ ระบบจะบันทึกการยืนยันของท่าน",
+    "🟢 เมื่ออ่านครบแล้ว กรุณากดปุ่มยอมรับด้านล่าง ระบบจะบันทึกการยืนยันและคืนสิทธิ์ที่ถูกล็อกไว้โดยอัตโนมัติ",
     "",
     "🥷 Ninjamap Community เชื่อว่า",
     "",

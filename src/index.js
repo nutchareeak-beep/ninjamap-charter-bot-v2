@@ -103,12 +103,12 @@ async function registerGuildCommands() {
   await rest.put(Routes.applicationGuildCommands(config.clientId, config.guildId), { body: commands });
 }
 
-function sectionButton(section, index) {
+function acceptAllButton() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`charter_accept:${index}:${section.id}`)
-      .setLabel(`ยอมรับ: ${section.label}`)
-      .setStyle(ButtonStyle.Primary)
+      .setCustomId("charter_accept_all")
+      .setLabel("ยอมรับ Community Charter")
+      .setStyle(ButtonStyle.Success)
   );
 }
 
@@ -224,15 +224,22 @@ async function postCharterIfNeeded(channel) {
       message.content.includes("Checklist mode: item-by-item") &&
       message.content.includes(config.charterVersion)
   );
+  const hasSingleButtonVersion = messages.some(
+    (message) =>
+      message.author.id === client.user.id &&
+      message.content.includes("Acceptance mode: single-button") &&
+      message.content.includes(config.charterVersion)
+  );
   const alreadyPosted = messages.some(
     (message) =>
       message.author.id === client.user.id &&
       message.content.includes("Ninjamap Community Charter 2026") &&
+      message.content.includes("Acceptance mode: single-button") &&
       !message.content.includes("Checklist mode: item-by-item") &&
       message.content.includes(config.charterVersion)
   );
 
-  if (alreadyPosted && !hasChecklistVersion) return;
+  if (alreadyPosted && hasSingleButtonVersion && !hasChecklistVersion) return;
 
   for (const message of messages.values()) {
     if (message.author.id === client.user.id) {
@@ -244,12 +251,14 @@ async function postCharterIfNeeded(channel) {
 
   for (const [index, section] of charterSections.entries()) {
     await channel.send({
-      content: buildSectionBody(section, index, charterSections.length),
-      components: [sectionButton(section, index)]
+      content: buildSectionBody(section, index, charterSections.length)
     });
   }
 
-await channel.send(buildCharterOutro());
+  await channel.send({
+    content: buildCharterOutro(),
+    components: [acceptAllButton()]
+  });
 }
 
 async function resolveCoachRole(guild) {
@@ -494,15 +503,6 @@ async function handleReverifyRollbackTest(interaction) {
 }
 
 async function handleCharterButton(interaction) {
-  const [, rawIndex, sectionId] = interaction.customId.split(":");
-  const index = Number(rawIndex);
-  const section = charterSections[index];
-
-  if (!section || section.id !== sectionId) {
-    await interaction.reply({ content: "ไม่พบหัวข้อที่ต้องยืนยัน กรุณาแจ้งทีมงานค่ะ", ephemeral: true });
-    return;
-  }
-
   if (!memberCanTest(interaction.member)) {
     await interaction.reply({
       content: "ตอนนี้อยู่ในโหมดทดสอบ เฉพาะผู้ที่มี role Coach เท่านั้นที่สามารถทดลองกดยืนยันได้ค่ะ",
@@ -511,60 +511,30 @@ async function handleCharterButton(interaction) {
     return;
   }
 
-  const validSectionIds = new Set(charterSections.map((item) => item.id));
-  const accepted = new Set([...getAcceptedSectionsForUser(interaction.user.id)].filter((item) => validSectionIds.has(item)));
-  const previousSection = charterSections[index - 1];
+  const acceptedSectionIds = charterSections.map((section) => section.id);
+  setAcceptedSectionsForUser(interaction.user.id, acceptedSectionIds);
+  await logAcceptance(interaction, acceptedSectionIds);
+  const restoreResult = await restoreManagedRolesFromSnapshot(
+    interaction.member,
+    `Ninjamap Charter accepted ${config.charterVersion}`
+  );
 
-  if (previousSection && !accepted.has(previousSection.id)) {
-    await interaction.reply({
-      content: `กรุณายืนยันหัวข้อก่อนหน้าให้เรียบร้อยก่อน: ${previousSection.label}`,
-      ephemeral: true
-    });
-    return;
-  }
-
-  accepted.add(section.id);
-  setAcceptedSectionsForUser(interaction.user.id, accepted);
-  const acceptedSectionIds = charterSections
-    .map((item) => item.id)
-    .filter((sectionId) => accepted.has(sectionId));
-  const hasAcceptedAllSections = charterSections.every((item) => accepted.has(item.id));
-
-  if (hasAcceptedAllSections) {
-    await logAcceptance(interaction, acceptedSectionIds);
-    const restoreResult = await restoreManagedRolesFromSnapshot(
-      interaction.member,
-      `Ninjamap Charter accepted ${config.charterVersion}`
-    );
-
-    await interaction.reply({
-      content: [
-        "ยืนยัน Community Charter ครบทุกข้อแล้วค่ะ",
-        `บันทึกเวลา: ${new Date().toISOString()}`,
-        `Charter version: ${config.charterVersion}`,
-        "",
-        restoreResult.status === "restored"
-          ? `คืน role แล้ว: ${restoreResult.restoredRoles.map((role) => role.name).join(", ") || "none"}`
-          : `สถานะการคืน role: ${restoreResult.status}`,
-        restoreResult.failedRoles.length
-          ? `Role ที่คืนไม่สำเร็จ: ${restoreResult.failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ")}`
-          : "Role ที่คืนไม่สำเร็จ: none",
-        "",
-        restoreResult.status === "no_snapshot"
-          ? "ไม่พบ snapshot สำหรับ user นี้ หากถูกถอด role ไว้ กรุณาแจ้งแอดมินให้ใช้ /reverify-rollback-test"
-          : "ขอบคุณที่ยืนยัน Community Charter ค่ะ"
-      ].join("\n"),
-      ephemeral: true
-    });
-    return;
-  }
-
-  const nextSection = charterSections.find((item) => !accepted.has(item.id));
   await interaction.reply({
     content: [
-      `บันทึกหัวข้อ ${section.label} แล้วค่ะ`,
-      `ความคืบหน้า: ${acceptedSectionIds.length}/${charterSections.length}`,
-      nextSection ? `กรุณากดหัวข้อถัดไป: ${nextSection.label}` : "กรุณากดหัวข้อสุดท้ายเพื่อยืนยันให้ครบค่ะ"
+      "ยืนยัน Community Charter เรียบร้อยแล้วค่ะ",
+      `บันทึกเวลา: ${new Date().toISOString()}`,
+      `Charter version: ${config.charterVersion}`,
+      "",
+      restoreResult.status === "restored"
+        ? `คืน role แล้ว: ${restoreResult.restoredRoles.map((role) => role.name).join(", ") || "none"}`
+        : `สถานะการคืน role: ${restoreResult.status}`,
+      restoreResult.failedRoles.length
+        ? `Role ที่คืนไม่สำเร็จ: ${restoreResult.failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ")}`
+        : "Role ที่คืนไม่สำเร็จ: none",
+      "",
+      restoreResult.status === "no_snapshot"
+        ? "ยังไม่พบ snapshot สำหรับ user นี้ หากคุณถูกล็อก role อยู่ กรุณาแจ้งแอดมินให้ใช้ /reverify-rollback-test"
+        : "ขอบคุณที่ยืนยัน Community Charter ค่ะ"
     ].join("\n"),
     ephemeral: true
   });
@@ -603,8 +573,16 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    if (interaction.isButton() && interaction.customId.startsWith("charter_accept:")) {
+    if (interaction.isButton() && interaction.customId === "charter_accept_all") {
       await handleCharterButton(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("charter_accept:")) {
+      await interaction.reply({
+        content: "ปุ่มนี้เป็นเวอร์ชันเก่าค่ะ กรุณาใช้ปุ่ม `ยอมรับ Community Charter` ด้านล่างสุดของโพสต์ใหม่",
+        ephemeral: true
+      });
       return;
     }
 
