@@ -3,7 +3,7 @@ services:
     name: ninjamap-charter-bot
     runtime: node
     plan: starter
-    buildCommand: npm install
+    buildCommand: npm install --omit=dev --no-audit --no-fund
     startCommand: npm start
     envVars:
       - key: NODE_VERSION
