@@ -22,6 +22,7 @@ import {
 import {
   exportLogsCsv,
   getRoleSnapshot,
+  readRoleSnapshots,
   readAcceptanceLogs,
   upsertAcceptanceLog,
   upsertRoleSnapshot
@@ -46,7 +47,10 @@ const config = {
   protectedRoleNames: (process.env.PROTECTED_ROLE_NAMES || "Admin,Staff,Bot")
     .split(",")
     .map((name) => name.trim())
-    .filter(Boolean)
+    .filter(Boolean),
+  memberScanEnabled: (process.env.ENABLE_MEMBER_SCAN || "false").toLowerCase() === "true",
+  reverifyBatchSize: Number.parseInt(process.env.REVERIFY_BATCH_SIZE || "25", 10),
+  reverifyBatchDelayMs: Number.parseInt(process.env.REVERIFY_BATCH_DELAY_MS || "1500", 10)
 };
 
 if (!config.token) {
@@ -57,11 +61,15 @@ if (!config.clientId) {
   throw new Error("Missing CLIENT_ID in .env");
 }
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
+const clientIntents = [GatewayIntentBits.Guilds];
+if (config.memberScanEnabled) {
+  clientIntents.push(GatewayIntentBits.GuildMembers);
+}
+
+const client = new Client({ intents: clientIntents });
 
 const userProgress = new Map();
+let reverifyAllJob = null;
 
 async function registerGuildCommands() {
   const commands = [
@@ -106,6 +114,40 @@ async function registerGuildCommands() {
           .setDescription("Member to inspect.")
           .setRequired(true)
       )
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("reverify-dry-run-all")
+      .setDescription("Count members who would be locked by the Community Charter reverify.")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("reverify-start-all")
+      .setDescription("Start locking unaccepted members in small background batches.")
+      .addIntegerOption((option) =>
+        option
+          .setName("batch_size")
+          .setDescription("How many members to lock per batch. Default comes from Railway.")
+          .setMinValue(1)
+          .setMaxValue(100)
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("delay_ms")
+          .setDescription("Delay between each member. Default comes from Railway.")
+          .setMinValue(500)
+          .setMaxValue(10000)
+      )
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("reverify-stop-all")
+      .setDescription("Stop the currently running background reverify lock job.")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("reverify-summary")
+      .setDescription("Show Community Charter reverify progress summary.")
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
       .toJSON()
   ];
@@ -299,6 +341,136 @@ function getManagedRolesFromMember(member) {
     .map((role) => ({ id: role.id, name: role.name }));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function requireMemberScan(interaction) {
+  if (config.memberScanEnabled) return false;
+  return interaction.reply({
+    content: [
+      "ยังสแกนสมาชิกทั้งเซิร์ฟเวอร์ไม่ได้ค่ะ",
+      "",
+      "ต้องเปิด 2 จุดก่อน:",
+      "1. Discord Developer Portal > Bot > Privileged Gateway Intents > เปิด Server Members Intent แล้ว Save",
+      "2. Railway Variables ตั้ง `ENABLE_MEMBER_SCAN=true` แล้ว Deploy ใหม่",
+      "",
+      "หลังจากนั้นคำสั่งถอด role ทั้งเซิร์ฟเวอร์จะใช้งานได้ค่ะ"
+    ].join("\n"),
+    ephemeral: true
+  });
+}
+
+function isAccepted(logs, userId) {
+  return logs.some((log) => log.userId === userId && log.charterVersion === config.charterVersion);
+}
+
+function snapshotStatusByUser(snapshots) {
+  return new Map(
+    snapshots
+      .filter((snapshot) => snapshot.charterVersion === config.charterVersion)
+      .map((snapshot) => [snapshot.userId, snapshot.status])
+  );
+}
+
+async function fetchAllGuildMembers(guild) {
+  await guild.roles.fetch();
+  return guild.members.fetch();
+}
+
+async function lockManagedRolesForMember(member, reason) {
+  const managedRoles = getManagedRolesFromMember(member);
+  const now = new Date().toISOString();
+
+  await upsertRoleSnapshot({
+    userId: member.id,
+    username: member.user.tag,
+    charterVersion: config.charterVersion,
+    removedRoles: managedRoles,
+    snapshotAt: now,
+    removedAt: null,
+    restoredAt: null,
+    status: "snapshot_saved"
+  });
+
+  const removedRoles = [];
+  const failedRoles = [];
+
+  for (const role of managedRoles) {
+    try {
+      await member.roles.remove(role.id, reason);
+      removedRoles.push(role);
+    } catch (error) {
+      failedRoles.push({ ...role, reason: error.message });
+    }
+  }
+
+  await upsertRoleSnapshot({
+    userId: member.id,
+    username: member.user.tag,
+    charterVersion: config.charterVersion,
+    removedRoles: managedRoles,
+    actuallyRemovedRoles: removedRoles,
+    failedRemovedRoles: failedRoles,
+    snapshotAt: now,
+    removedAt: new Date().toISOString(),
+    restoredAt: null,
+    status: failedRoles.length ? "partial_lock_failed" : "locked"
+  });
+
+  return { managedRoles, removedRoles, failedRoles };
+}
+
+async function buildReverifySummary(guild) {
+  const [members, acceptanceLogs, snapshots] = await Promise.all([
+    fetchAllGuildMembers(guild),
+    readAcceptanceLogs(),
+    readRoleSnapshots()
+  ]);
+  const snapshotStatus = snapshotStatusByUser(snapshots);
+
+  const summary = {
+    totalMembers: members.size,
+    botsOrProtected: 0,
+    accepted: 0,
+    currentlyLocked: 0,
+    wouldLock: 0,
+    noManagedRoles: 0,
+    failedOrPartial: 0
+  };
+
+  for (const member of members.values()) {
+    if (memberHasProtectedRole(member)) {
+      summary.botsOrProtected += 1;
+      continue;
+    }
+
+    if (isAccepted(acceptanceLogs, member.id)) {
+      summary.accepted += 1;
+      continue;
+    }
+
+    const status = snapshotStatus.get(member.id);
+    if (status === "locked") {
+      summary.currentlyLocked += 1;
+      continue;
+    }
+
+    if (status === "partial_lock_failed") {
+      summary.failedOrPartial += 1;
+    }
+
+    const managedRoles = getManagedRolesFromMember(member);
+    if (managedRoles.length > 0) {
+      summary.wouldLock += 1;
+    } else {
+      summary.noManagedRoles += 1;
+    }
+  }
+
+  return summary;
+}
+
 async function getTargetMember(interaction) {
   const user = interaction.options.getUser("member", true);
   return interaction.guild.members.fetch(user.id);
@@ -413,7 +585,6 @@ async function handleReverifyLockTest(interaction) {
   }
 
   const managedRoles = getManagedRolesFromMember(member);
-  const now = new Date().toISOString();
 
   if (!apply) {
     await interaction.reply({
@@ -431,47 +602,16 @@ async function handleReverifyLockTest(interaction) {
     return;
   }
 
-  await upsertRoleSnapshot({
-    userId: member.id,
-    username: member.user.tag,
-    charterVersion: config.charterVersion,
-    removedRoles: managedRoles,
-    snapshotAt: now,
-    removedAt: null,
-    restoredAt: null,
-    status: "snapshot_saved"
-  });
-
-  const removedRoles = [];
-  const failedRoles = [];
-
-  for (const role of managedRoles) {
-    try {
-      await member.roles.remove(role.id, `Ninjamap Charter test lock ${config.charterVersion}`);
-      removedRoles.push(role);
-    } catch (error) {
-      failedRoles.push({ ...role, reason: error.message });
-    }
-  }
-
-  await upsertRoleSnapshot({
-    userId: member.id,
-    username: member.user.tag,
-    charterVersion: config.charterVersion,
-    removedRoles: managedRoles,
-    actuallyRemovedRoles: removedRoles,
-    failedRemovedRoles: failedRoles,
-    snapshotAt: now,
-    removedAt: new Date().toISOString(),
-    restoredAt: null,
-    status: failedRoles.length ? "partial_lock_failed" : "locked"
-  });
+  const result = await lockManagedRolesForMember(
+    member,
+    `Ninjamap Charter test lock ${config.charterVersion}`
+  );
 
   await sendAuditLog(interaction.guild, [
     "**Reverify test lock applied**",
     `User: ${member.user.tag} (${member.id})`,
-    `Removed: ${removedRoles.map((role) => role.name).join(", ") || "none"}`,
-    `Failed: ${failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
+    `Removed: ${result.removedRoles.map((role) => role.name).join(", ") || "none"}`,
+    `Failed: ${result.failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
     `Charter version: ${config.charterVersion}`
   ]);
 
@@ -480,8 +620,8 @@ async function handleReverifyLockTest(interaction) {
       "**Applied: reverify lock test**",
       `User: ${member.user.tag}`,
       `Snapshot saved: ${managedRoles.map((role) => role.name).join(", ") || "none"}`,
-      `Removed: ${removedRoles.map((role) => role.name).join(", ") || "none"}`,
-      `Failed: ${failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
+      `Removed: ${result.removedRoles.map((role) => role.name).join(", ") || "none"}`,
+      `Failed: ${result.failedRoles.map((role) => `${role.name} (${role.reason})`).join(", ") || "none"}`,
       "",
       "ยังไม่แตะ role อื่น และยังไม่ล็อกทั้ง server ค่ะ"
     ].join("\n"),
@@ -546,6 +686,244 @@ async function handleReverifyStatus(interaction) {
       "",
       `Current managed roles: ${currentManagedRoles.map((role) => role.name).join(", ") || "none"}`
     ].join("\n"),
+    ephemeral: true
+  });
+}
+
+async function handleReverifyDryRunAll(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    await interaction.reply({ content: "คำสั่งนี้ใช้ได้เฉพาะแอดมินค่ะ", ephemeral: true });
+    return;
+  }
+
+  if (!config.memberScanEnabled) {
+    await requireMemberScan(interaction);
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const summary = await buildReverifySummary(interaction.guild);
+
+  await interaction.editReply({
+    content: [
+      "**Dry-run: reverify all**",
+      "ยังไม่ได้ถอด role ใด ๆ ค่ะ",
+      "",
+      `สมาชิกทั้งหมดที่บอทเห็น: ${summary.totalMembers}`,
+      `ข้าม bot/protected roles: ${summary.botsOrProtected}`,
+      `กดยอมรับแล้ว: ${summary.accepted}`,
+      `ถูกล็อกอยู่แล้ว: ${summary.currentlyLocked}`,
+      `จะถูกถอด role หากเริ่มจริง: ${summary.wouldLock}`,
+      `ไม่มี role 5 ตัวให้ถอด: ${summary.noManagedRoles}`,
+      `เคยมีรายการ partial/failed: ${summary.failedOrPartial}`,
+      "",
+      `Role ที่จัดการ: ${config.managedRoleNames.join(", ")}`,
+      "ถ้าตัวเลขถูกต้อง ให้ใช้ `/reverify-start-all` เพื่อเริ่มถอดทีละชุดค่ะ"
+    ].join("\n")
+  });
+}
+
+async function handleReverifySummary(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    await interaction.reply({ content: "คำสั่งนี้ใช้ได้เฉพาะแอดมินค่ะ", ephemeral: true });
+    return;
+  }
+
+  if (!config.memberScanEnabled) {
+    await requireMemberScan(interaction);
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const summary = await buildReverifySummary(interaction.guild);
+  const jobStatus = reverifyAllJob
+    ? `กำลังทำงาน: processed ${reverifyAllJob.processed}/${reverifyAllJob.total}, locked ${reverifyAllJob.locked}, failed ${reverifyAllJob.failed}`
+    : "ไม่มีงาน background ที่กำลังรันอยู่";
+
+  await interaction.editReply({
+    content: [
+      "**Reverify summary**",
+      `สถานะงาน: ${jobStatus}`,
+      "",
+      `สมาชิกทั้งหมดที่บอทเห็น: ${summary.totalMembers}`,
+      `ข้าม bot/protected roles: ${summary.botsOrProtected}`,
+      `กดยอมรับแล้ว: ${summary.accepted}`,
+      `ถูกล็อกอยู่แล้ว: ${summary.currentlyLocked}`,
+      `ยังเหลือที่ต้องถอด role: ${summary.wouldLock}`,
+      `ไม่มี role 5 ตัวให้ถอด: ${summary.noManagedRoles}`,
+      `partial/failed: ${summary.failedOrPartial}`
+    ].join("\n")
+  });
+}
+
+async function handleReverifyStartAll(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    await interaction.reply({ content: "คำสั่งนี้ใช้ได้เฉพาะแอดมินค่ะ", ephemeral: true });
+    return;
+  }
+
+  if (!config.memberScanEnabled) {
+    await requireMemberScan(interaction);
+    return;
+  }
+
+  if (reverifyAllJob) {
+    await interaction.reply({
+      content: "มีงาน reverify all กำลังรันอยู่แล้วค่ะ ใช้ `/reverify-summary` เพื่อดูสถานะ หรือ `/reverify-stop-all` เพื่อหยุด",
+      ephemeral: true
+    });
+    return;
+  }
+
+  const batchSize = interaction.options.getInteger("batch_size") || config.reverifyBatchSize;
+  const delayMs = interaction.options.getInteger("delay_ms") || config.reverifyBatchDelayMs;
+
+  await interaction.deferReply({ ephemeral: true });
+  const [members, acceptanceLogs, snapshots] = await Promise.all([
+    fetchAllGuildMembers(interaction.guild),
+    readAcceptanceLogs(),
+    readRoleSnapshots()
+  ]);
+  const snapshotStatus = snapshotStatusByUser(snapshots);
+
+  const targets = members
+    .filter((member) => {
+      if (memberHasProtectedRole(member)) return false;
+      if (isAccepted(acceptanceLogs, member.id)) return false;
+      if (snapshotStatus.get(member.id) === "locked" && getManagedRolesFromMember(member).length === 0) return false;
+      return getManagedRolesFromMember(member).length > 0;
+    })
+    .map((member) => member.id);
+
+  if (targets.length === 0) {
+    await interaction.editReply({
+      content: "ไม่มีสมาชิกที่ต้องถอด role เพิ่มแล้วค่ะ ตอนนี้คนที่ยังไม่กดยอมรับและยังมี role 5 ตัว = 0"
+    });
+    return;
+  }
+
+  reverifyAllJob = {
+    stopped: false,
+    total: targets.length,
+    processed: 0,
+    locked: 0,
+    failed: 0,
+    startedAt: new Date().toISOString()
+  };
+
+  await interaction.editReply({
+    content: [
+      "**เริ่ม reverify ทั้งเซิร์ฟเวอร์แล้วค่ะ**",
+      `จำนวนที่จะค่อย ๆ ถอด role: ${targets.length} คน`,
+      `ทำทีละชุด: ${batchSize} คน`,
+      `พักระหว่างแต่ละคน: ${delayMs} ms`,
+      "",
+      "บอทจะทำงานต่อเองในพื้นหลัง ไม่ต้องเปิดคอมเครื่องนี้ทิ้งไว้ค่ะ",
+      "ดูความคืบหน้าได้ด้วย `/reverify-summary`",
+      "หยุดงานได้ด้วย `/reverify-stop-all`"
+    ].join("\n")
+  });
+
+  void runReverifyAllJob(interaction.guild, targets, batchSize, delayMs, interaction.channel).catch((error) => {
+    console.error(error);
+    reverifyAllJob = null;
+  });
+}
+
+async function runReverifyAllJob(guild, targets, batchSize, delayMs, reportChannel) {
+  let batchLocked = 0;
+  let batchFailed = 0;
+
+  for (const userId of targets) {
+    if (!reverifyAllJob || reverifyAllJob.stopped) break;
+
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member || memberHasProtectedRole(member) || getManagedRolesFromMember(member).length === 0) {
+      reverifyAllJob.processed += 1;
+      continue;
+    }
+
+    const acceptanceLogs = await readAcceptanceLogs();
+    if (isAccepted(acceptanceLogs, member.id)) {
+      reverifyAllJob.processed += 1;
+      continue;
+    }
+
+    const result = await lockManagedRolesForMember(
+      member,
+      `Ninjamap Charter batch lock ${config.charterVersion}`
+    );
+
+    reverifyAllJob.processed += 1;
+    if (result.failedRoles.length) {
+      reverifyAllJob.failed += 1;
+      batchFailed += 1;
+    } else {
+      reverifyAllJob.locked += 1;
+      batchLocked += 1;
+    }
+
+    if (reverifyAllJob.processed % batchSize === 0) {
+      await sendAuditLog(guild, [
+        "**Reverify batch progress**",
+        `Processed: ${reverifyAllJob.processed}/${reverifyAllJob.total}`,
+        `Locked: ${reverifyAllJob.locked}`,
+        `Failed: ${reverifyAllJob.failed}`,
+        `Last batch locked: ${batchLocked}`,
+        `Last batch failed: ${batchFailed}`
+      ]);
+      batchLocked = 0;
+      batchFailed = 0;
+      await sleep(delayMs * 5);
+    } else {
+      await sleep(delayMs);
+    }
+  }
+
+  const finalJob = reverifyAllJob;
+  reverifyAllJob = null;
+
+  if (finalJob?.stopped) {
+    await sendAuditLog(guild, [
+      "**Reverify all stopped**",
+      `Processed: ${finalJob.processed}/${finalJob.total}`,
+      `Locked: ${finalJob.locked}`,
+      `Failed: ${finalJob.failed}`
+    ]);
+    return;
+  }
+
+  await sendAuditLog(guild, [
+    "**Reverify all completed**",
+    `Processed: ${finalJob?.processed || 0}/${finalJob?.total || 0}`,
+    `Locked: ${finalJob?.locked || 0}`,
+    `Failed: ${finalJob?.failed || 0}`
+  ]);
+
+  if (!config.logChannelId && reportChannel?.isTextBased()) {
+    await reportChannel.send([
+      "**Reverify all completed**",
+      `Processed: ${finalJob?.processed || 0}/${finalJob?.total || 0}`,
+      `Locked: ${finalJob?.locked || 0}`,
+      `Failed: ${finalJob?.failed || 0}`
+    ].join("\n")).catch(() => null);
+  }
+}
+
+async function handleReverifyStopAll(interaction) {
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+    await interaction.reply({ content: "คำสั่งนี้ใช้ได้เฉพาะแอดมินค่ะ", ephemeral: true });
+    return;
+  }
+
+  if (!reverifyAllJob) {
+    await interaction.reply({ content: "ตอนนี้ไม่มีงาน reverify all ที่กำลังรันอยู่ค่ะ", ephemeral: true });
+    return;
+  }
+
+  reverifyAllJob.stopped = true;
+  await interaction.reply({
+    content: "สั่งหยุดงานแล้วค่ะ บอทจะหยุดหลังจบรายการคนปัจจุบัน",
     ephemeral: true
   });
 }
@@ -659,6 +1037,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isChatInputCommand() && interaction.commandName === "reverify-status") {
       await handleReverifyStatus(interaction);
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "reverify-dry-run-all") {
+      await handleReverifyDryRunAll(interaction);
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "reverify-start-all") {
+      await handleReverifyStartAll(interaction);
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "reverify-stop-all") {
+      await handleReverifyStopAll(interaction);
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === "reverify-summary") {
+      await handleReverifySummary(interaction);
     }
   } catch (error) {
     console.error(error);

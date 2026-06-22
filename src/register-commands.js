@@ -46,6 +46,36 @@ const commands = [
         .setDescription("Member to inspect.")
         .setRequired(true)
     )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName("reverify-dry-run-all")
+    .setDescription("Count members who would be locked by the Community Charter reverify.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName("reverify-start-all")
+    .setDescription("Start locking unaccepted members in small background batches.")
+    .addIntegerOption((option) =>
+      option
+        .setName("batch_size")
+        .setDescription("How many members to lock per batch. Default comes from Railway.")
+        .setMinValue(1)
+        .setMaxValue(100)
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName("delay_ms")
+        .setDescription("Delay between each member. Default comes from Railway.")
+        .setMinValue(500)
+        .setMaxValue(10000)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName("reverify-stop-all")
+    .setDescription("Stop the currently running background reverify lock job.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName("reverify-summary")
+    .setDescription("Show Community Charter reverify progress summary.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ].map((command) => command.toJSON());
 

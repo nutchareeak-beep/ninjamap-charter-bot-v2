@@ -2,18 +2,18 @@
 
 บอทนี้สร้างและดูแลห้อง `#ข้อตกลงและเงื่อนไข` สำหรับ Ninjamap Community Charter 2026 เท่านั้น
 
-เวอร์ชันนี้ยังไม่ล็อก role, ไม่ถอด role, ไม่คืน role และไม่กระทบสมาชิกคนใด
+เวอร์ชันนี้รองรับการล็อก role แบบค่อย ๆ ทำเป็นชุด และคืน role อัตโนมัติเมื่อสมาชิกกดยอมรับ Charter
 
 ## สิ่งที่บอททำ
 
 - สร้าง channel `#ข้อตกลงและเงื่อนไข`
 - ถ้าไม่ได้ตั้ง `CHARTER_CATEGORY_ID` บอทจะสร้าง channel ใต้ category เดียวกับ channel อ้างอิง `1158357016570503208`
 - โพสต์ Ninjamap Community Charter 2026
-- ให้สมาชิกกดยอมรับทีละ section ตามลำดับ
+- ให้สมาชิกกดปุ่มเดียว `ยอมรับ Community Charter`
 - บันทึก Discord User ID, username, accepted sections, timestamp และ charter version
 - มีคำสั่ง `/export-acceptance-logs`
-- มี test mode สำหรับ role Coach ก่อนเปิดใช้จริง
 - มีคำสั่ง test lock รายคน โดยจัดการเฉพาะ role `user`, `Membership`, `นักเรียน`, `Member`, `Free`
+- มีคำสั่ง lock ทั้ง server แบบ batch โดยข้าม admin/staff/bot/protected roles และข้ามคนที่กดยอมรับแล้ว
 - รองรับ PostgreSQL ผ่าน `DATABASE_URL` เพื่อเก็บ snapshot แบบถาวร
 
 ## Setup
@@ -44,6 +44,9 @@ MANAGED_ROLE_NAMES=user,Membership,นักเรียน,Member,Free
 PROTECTED_ROLE_NAMES=Admin,Staff,Bot
 DATABASE_URL=
 PGSSLMODE=require
+ENABLE_MEMBER_SCAN=false
+REVERIFY_BATCH_SIZE=25
+REVERIFY_BATCH_DELAY_MS=1500
 ```
 
 ถ้าต้องการบังคับ category เอง ให้ใส่:
@@ -115,3 +118,33 @@ user, Membership, นักเรียน, Member, Free
 ```text
 /reverify-rollback-test member:@name
 ```
+
+## Full Server Batch Lock
+
+ก่อนใช้กับทั้ง server ต้องเปิด `Server Members Intent` ใน Discord Developer Portal > Bot และตั้ง Railway variable:
+
+```env
+ENABLE_MEMBER_SCAN=true
+```
+
+ลำดับใช้งานจริง:
+
+```text
+/reverify-dry-run-all
+/reverify-start-all batch_size:25 delay_ms:1500
+/reverify-summary
+```
+
+ถ้าต้องหยุดงาน:
+
+```text
+/reverify-stop-all
+```
+
+บอทจะถอดเฉพาะ 5 role นี้เท่านั้น:
+
+```text
+user, Membership, นักเรียน, Member, Free
+```
+
+สมาชิกที่กดยอมรับแล้วจะถูกข้าม และสมาชิกที่ถูกล็อกแล้วจะได้ role คืนเองทันทีเมื่อกด `ยอมรับ Community Charter`
